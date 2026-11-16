@@ -1,0 +1,246 @@
+{
+  "findings": [
+    {
+      "id": "upload-active-content-privilege-escalation",
+      "title": "Limited administrators can publish executable same-origin files and take over a super-administrator session",
+      "severity": "high",
+      "confidence": "high",
+      "validation": "Confirmed by static source tracing; no application execution, network requests or attack inputs were used.",
+      "cwe": ["CWE-79", "CWE-434"],
+      "primaryLocation": {
+        "path": "utils/views.py",
+        "startLine": 60,
+        "endLine": 65
+      },
+      "relatedLocations": [
+        {"path": "fps/parser.py", "startLine": 114, "endLine": 117},
+        {"path": "deploy/nginx/locations.conf", "startLine": 1, "endLine": 3},
+        {"path": "deploy/nginx/nginx.conf", "startLine": 13, "endLine": 14},
+        {"path": "account/views/admin.py", "startLine": 46, "endLine": 100}
+      ],
+      "attacker": "An authenticated ordinary Admin, including one without global problem-management or super-administrator permissions.",
+      "entryPoint": "POST /api/admin/upload_file; FPS import provides an additional route to the same unsafe publication capability.",
+      "preconditions": [
+        "The supplied production Nginx configuration serves uploads from the application origin.",
+        "The packaged /etc/nginx/mime.types retains its standard HTML or SVG MIME mapping.",
+        "A higher-privilege user opens the attacker-provided uploaded document URL while authenticated."
+      ],
+      "sourceToSink": [
+        "oj/urls.py:16 mounts utils.urls under /api/admin/. account/middleware.py:36-41 requires only administrator role for this prefix.",
+        "utils/urls.py:7 routes upload_file to SimditorFileUploadAPIView. The class has no narrower role decorator; account/serializers.py:134-135 uses a generic FileField.",
+        "utils/views.py:60-65 preserves any supplied suffix, including active document suffixes, and writes attacker-controlled bytes into settings.UPLOAD_DIR. Lines 71-75 return the generated public path.",
+        "oj/settings.py:134-135 resolves the production directory to /data/public/upload. deploy/nginx/locations.conf:1-3 serves /public from /data on the application's HTTP/HTTPS servers.",
+        "deploy/nginx/nginx.conf:13 loads MIME mappings. No attachment disposition, sandbox CSP or separate-origin serving policy is declared for uploaded files. Correctly typed HTML/SVG therefore remains active on direct navigation.",
+        "A same-origin document can request /api/profile, whose GET establishes a CSRF cookie (account/views/oj.py:31-51), and issue authorized same-origin API requests using the victim session and CSRF token.",
+        "account/urls/admin.py:6 exposes UserAdminAPI. Its super-administrator-authorized PUT accepts the target account ID and directly changes admin_type, password, OpenAPI and TFA state without password/TOTP step-up (account/views/admin.py:46-100; account/serializers.py:86-97). The attacker can promote its own limited administrator account using the victim's authority."
+      ],
+      "additionalAffectedPath": "FPSParser accepts uploaded image src and base64 bytes (fps/parser.py:78-84); FPSHelper.save_image preserves the source extension and writes the bytes without image validation (fps/parser.py:109-119). FPSProblemImport calls this helper with the same public upload directory (problem/views/admin.py:697). Group this with the primary upload finding rather than reporting a duplicate.",
+      "impact": "Persistent attacker-authored content can exercise a logged-in super-administrator's API authority, promoting the attacker account, changing credentials, disabling TFA or accessing privileged configuration. This establishes application privilege escalation; it does not establish backend or host code execution.",
+      "counterevidenceConsidered": [
+        "The upload requires an administrator, but the application explicitly distinguishes ordinary Admin from Super Admin and reserves user/secret configuration APIs for the latter.",
+        "X-Content-Type-Options: nosniff does not isolate a document correctly served as text/html or image/svg+xml.",
+        "X-Frame-Options: SAMEORIGIN does not stop direct navigation or same-origin document scripting.",
+        "CSRF protection does not prevent malicious code already executing in the application origin.",
+        "The finding requires victim interaction and does not assert automatic execution merely from embedding an SVG as an image."
+      ],
+      "recommendation": "Serve untrusted uploads from an origin that receives no application authentication cookies, or force arbitrary attachments to download with a non-active content type. Apply the policy to editor uploads and FPS images together; validate image content and safe output formats for image-only routes.",
+      "verificationBoundary": "Actual installed MIME contents, browser behavior and any additional upstream response headers were not inspected. An upstream configuration that already forces download or isolates the upload origin would change exploitability."
+    }
+  ],
+  "resolved_questions": [
+    {
+      "question": "Do ZIP uploads establish a backend arbitrary-file-write/RCE path?",
+      "resolution": "No such path was established. TestCaseZipProcessor reads only constructed numbered 1.in/1.out entries and writes constructed leaf names beneath a generated testcase directory. It does not call extractall on attacker archive paths. ZIP problem import reads fixed numbered problem.json entries and reuses this testcase processor.",
+      "evidence": [
+        "problem/views/admin.py:34-111",
+        "problem/views/admin.py:549-625"
+      ]
+    },
+    {
+      "question": "Does FPS XML parsing execute supplied code locally?",
+      "resolution": "The inspected parser uses ElementTree and base64 decoding and constructs problem data. Templates/SPJ source are stored as strings; the visible backend path does not evaluate or compile them locally. The active-file publication defect is captured separately above.",
+      "evidence": [
+        "fps/parser.py:9-106",
+        "problem/views/admin.py:631-670",
+        "problem/utils.py:18-30"
+      ]
+    },
+    {
+      "question": "Does SPJ compilation prove unintended backend RCE?",
+      "resolution": "No. The administrator API forwards SPJ source and fixed configured compiler settings to a separately selected JudgeServer. Contestant code follows the analogous external judge route. Intended code execution on that component is not itself a backend RCE finding.",
+      "evidence": [
+        "problem/views/admin.py:163-172",
+        "judge/dispatcher.py:69-88",
+        "judge/dispatcher.py:125-161",
+        "judge/languages.py:39-52",
+        "judge/languages.py:87-100"
+      ]
+    },
+    {
+      "question": "Can the registered JudgeServer destination be chained directly into Supervisor command execution?",
+      "resolution": "No source-complete chain was established. Supervisor is a separate loopback HTTP/XML-RPC control plane. Dispatcher requests are POSTs with a JSON-serialized dictionary, not attacker-selected XML-RPC request bodies. Merely choosing the Supervisor URL does not demonstrate an accepted privileged method invocation. Supervisor package version and any package-specific weakness are also unverified.",
+      "evidence": [
+        "judge/dispatcher.py:55-64",
+        "judge/dispatcher.py:74-84",
+        "judge/dispatcher.py:141-161",
+        "deploy/supervisord.conf:10-17",
+        "deploy/health_check.py:1-8",
+        "Dockerfile:10-12"
+      ]
+    },
+    {
+      "question": "Are sandbox and server privilege-escalation controls verifiable in this repository?",
+      "resolution": "Only requested language commands, seccomp-rule names and limits are visible. Actual JudgeServer/Judger execution, process identities, namespaces, mounts, capabilities and seccomp implementation are external. No sandbox escape or host-root escalation is reported from those missing sources.",
+      "evidence": [
+        "README.md:28-29",
+        "judge/languages.py:24-52",
+        "judge/languages.py:111-124",
+        "judge/languages.py:138-172",
+        "judge/dispatcher.py:141-152",
+        "deploy/supervisord.conf:30-46"
+      ]
+    },
+    {
+      "question": "Do startup shell interpolation or developer helpers establish a remote attacker entry point?",
+      "resolution": "No. Environment interpolation into the startup Python shell and shell execution in run_test.py consume operator/developer-controlled values. The inspected web APIs do not write these environment variables or invoke these helper scripts. They should not be promoted into remote RCE findings without an additional source-backed boundary crossing.",
+      "evidence": [
+        "deploy/entrypoint.sh:34-38",
+        "deploy/entrypoint.sh:50-53",
+        "deploy/entrypoint.sh:61-64",
+        "run_test.py:5-27"
+      ]
+    },
+    {
+      "question": "Do the remaining reviewed migrations contain attacker-driven execution?",
+      "resolution": "No new issue identified. They perform schema operations, fixed SQL resetting language options, and trusted data-repair callbacks for counts or stored judging output. No request-controlled shell, eval, archive extraction or remote import was found.",
+      "evidence": [
+        "options/migrations/0003_migrate_languages_options.py:14-17",
+        "problem/migrations/0011_fix_problem_ac_count.py:8-34",
+        "submission/migrations/0011_fix_submission_number.py:7-26",
+        "submission/migrations/0009_delete_user_output.py:7-23"
+      ]
+    },
+    {
+      "question": "Does legacy data migration introduce a remotely exposed import interface?",
+      "resolution": "The reviewed utility is an operator-invoked CLI, reads a named local JSON file, asks confirmation and imports users/problems/testcase metadata. Its ability to import role/password/path data operates under the invoking operator's existing database/filesystem authority; no web route to it was found.",
+      "evidence": [
+        "utils/migrate_data.py:91-117",
+        "utils/migrate_data.py:139-182",
+        "utils/migrate_data.py:185-212"
+      ]
+    },
+    {
+      "question": "What secret-bearing source references were encountered?",
+      "resolution": "The Travis Slack notification integration contains a plaintext credential reference at .travis.yml:16. Its current validity and integration capability were not tested. oj/settings.py:242-244 contains a fixed Raven/Sentry DSN; it establishes error-ingestion routing, not account or project-administrator access. Development DB credentials, initial administrator credentials and rsync password placeholders are deployment references already included in the architecture model. No literal credential material is reproduced here.",
+      "evidence": [
+        ".travis.yml:15-16",
+        "oj/settings.py:140-182",
+        "oj/settings.py:242-244",
+        "oj/dev_settings.py:6-14",
+        "deploy/entrypoint.sh:61-63",
+        "deploy/test_case_rsync/docker-compose.yml:9-24"
+      ]
+    },
+    {
+      "question": "Were binary assets audited as source?",
+      "resolution": "No. The two bundled captcha font files were inventoried as binary assets, not claimed as fully code-reviewed. The actual font consumer uses a fixed bundled filename, so no attacker-controlled font-path boundary was identified.",
+      "evidence": [
+        "utils/captcha/__init__.py:64-79"
+      ],
+      "remainingFiles": [
+        "utils/captcha/timesbi.ttf",
+        "utils/captcha/Menlo.ttc"
+      ]
+    }
+  ],
+  "fully_reviewed_files": [
+    ".dockerignore",
+    ".coveragerc",
+    ".gitignore",
+    ".flake8",
+    ".travis.yml",
+    ".github/issue_template.md",
+    "README.md",
+    "README-CN.md",
+    "LICENSE",
+    "manage.py",
+    "run_test.py",
+    "init_db.sh",
+    "Dockerfile",
+    "docs/README.md",
+    "docs/data.json",
+    "deploy/entrypoint.sh",
+    "deploy/health_check.py",
+    "deploy/requirements.txt",
+    "deploy/supervisord.conf",
+    "deploy/nginx/nginx.conf",
+    "deploy/nginx/locations.conf",
+    "deploy/nginx/api_proxy.conf",
+    "deploy/nginx/https_redirect.conf",
+    "deploy/test_case_rsync/Dockerfile",
+    "deploy/test_case_rsync/run.sh",
+    "deploy/test_case_rsync/rsyncd.conf",
+    "deploy/test_case_rsync/docker-compose.yml",
+    "utils/__init__.py",
+    "utils/xss_filter.py",
+    "utils/views.py",
+    "utils/urls.py",
+    "utils/throttling.py",
+    "utils/tasks.py",
+    "utils/shortcuts.py",
+    "utils/serializers.py",
+    "utils/models.py",
+    "utils/migrate_data.py",
+    "utils/cache.py",
+    "utils/constants.py",
+    "utils/management/__init__.py",
+    "utils/management/commands/__init__.py",
+    "utils/management/commands/inituser.py",
+    "utils/captcha/__init__.py",
+    "utils/captcha/views.py",
+    "utils/api/__init__.py",
+    "utils/api/_serializers.py",
+    "utils/api/tests.py",
+    "utils/api/api.py",
+    "fps/__init__.py",
+    "fps/parser.py",
+    "fps/fps.xml",
+    "problem/views/admin.py",
+    "problem/utils.py",
+    "judge/languages.py",
+    "account/views/admin.py",
+    "conf/migrations/__init__.py",
+    "conf/migrations/0001_initial.py",
+    "conf/migrations/0002_auto_20171011_1214.py",
+    "conf/migrations/0003_judgeserver_is_disabled.py",
+    "conf/migrations/0004_auto_20180501_0436.py",
+    "options/migrations/__init__.py",
+    "options/migrations/0001_initial.py",
+    "options/migrations/0002_auto_20180501_0436.py",
+    "options/migrations/0003_migrate_languages_options.py",
+    "problem/migrations/__init__.py",
+    "problem/migrations/0001_initial.py",
+    "problem/migrations/0002_problem__id.py",
+    "problem/migrations/0003_auto_20170217_0820.py",
+    "problem/migrations/0004_auto_20170501_0637.py",
+    "problem/migrations/0005_auto_20170815_1258.py",
+    "problem/migrations/0006_auto_20170823_0918.py",
+    "problem/migrations/0008_auto_20170923_1318.py",
+    "problem/migrations/0009_auto_20171011_1214.py",
+    "problem/migrations/0010_problem_spj_compile_ok.py",
+    "problem/migrations/0011_fix_problem_ac_count.py",
+    "problem/migrations/0012_auto_20180501_0436.py",
+    "problem/migrations/0013_problem_io_mode.py",
+    "problem/migrations/0014_problem_share_submission.py",
+    "submission/migrations/__init__.py",
+    "submission/migrations/0001_initial.py",
+    "submission/migrations/0002_auto_20170509_1203.py",
+    "submission/migrations/0005_submission_username.py",
+    "submission/migrations/0006_auto_20170830_1154.py",
+    "submission/migrations/0007_auto_20170923_1318.py",
+    "submission/migrations/0008_submission_ip.py",
+    "submission/migrations/0009_delete_user_output.py",
+    "submission/migrations/0011_fix_submission_number.py",
+    "submission/migrations/0012_auto_20180501_0436.py"
+  ]
+}
